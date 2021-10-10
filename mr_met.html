@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>mr met</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="style.css">
+
+		<script src="https://cdn.jsdelivr.net/npm/three/build/three.min.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/three/examples/js/loaders/OBJLoader.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/three/examples/js/loaders/GLTFLoader.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/three/examples/js/controls/OrbitControls.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/dat.gui/build/dat.gui.min.js"></script>
+	</head>
+
+	<body>
+		<script>
+			let clicked = false;
+			let renderer, scene, camera;
+			let gui, mesh;
+			let analyzer, frequencyArray, range;
+			let voiceParams = {'freqIndex': 15, 'noiseRatio': 0.1, 'gain': 1.0, 'eyebrowRatio': 0.8};
+			let mixer;
+			const clock = new THREE.Clock();
+
+			addEventListener('click', async () => {
+				if (clicked) return;
+				clicked = true;
+
+				// audio context
+				const audioCtx = new AudioContext();
+				const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+				const input  = audioCtx.createMediaStreamSource(stream);
+				analyzer = audioCtx.createAnalyser();
+				input.connect(analyzer);
+				frequencyArray = new Float32Array(analyzer.frequencyBinCount);
+
+				// audio analysis params
+				analyzer.fftSize = 256;
+				analyzer.smoothingTimeConstant = 0.9;
+				range = analyzer.maxDecibels - analyzer.minDecibels;
+
+				// renderer
+				const canvas = document.querySelector('#c');
+				renderer = new THREE.WebGLRenderer({
+					canvas,
+					alpha: true
+				});
+				renderer.setSize(window.innerWidth, window.innerHeight);
+				document.body.appendChild(renderer.domElement);
+				renderer.outputEncoding = THREE.sRGBEncoding; // affects background
+
+				// 4x downres
+				renderer.setPixelRatio(window.devicePixelRatio / 4.0);
+
+				// scene
+				scene = new THREE.Scene();
+
+				// camera
+				camera = new THREE.PerspectiveCamera(
+					20,
+					window.innerWidth / window.innerHeight,
+					1,
+					1000
+				);
+				camera.position.set(10, 1, 0);
+				scene.add(camera);
+
+				// controls
+				const controls = new THREE.OrbitControls(
+					camera,
+					renderer.domElement
+				);
+				controls.addEventListener('change', render);
+				controls.minDistance = 1;
+				controls.maxDistance = 10;
+				controls.enablePan = true;
+
+				// ambient
+				scene.add(new THREE.AmbientLight(0x99aaff, .5));
+
+				// light
+				const light = new THREE.DirectionalLight(0xfffffe, 0.7);
+				light.position.set(5, 10, -5);
+				scene.add(light);
+
+				// model
+				function onProgress(xhr) {
+					if (xhr.lengthComputable) {
+						const percentComplete = xhr.loaded / xhr.total * 100;
+						console.log(Math.round(percentComplete, 2) + '%');
+					}
+				}
+
+				function onError() {}
+
+				const gltfLoader = new THREE.GLTFLoader();
+				gltfLoader.load(
+					'res/mr_met_anim.gltf',
+					function(gltf) {
+						model = gltf.scene;
+						mixer = new THREE.AnimationMixer(model);
+						const action = mixer.clipAction(gltf.animations[0]);
+						action.play();
+						mesh = model.getObjectByName('combined_mesh');
+						scene.add(mesh);
+						createGUI(model);
+					},
+					onProgress,
+					onError
+				);
+
+				window.addEventListener('resize', onWindowResize);
+			});
+
+			function createGUI(model) {
+				gui = new dat.GUI();
+				gui.add(voiceParams, 'freqIndex', 0, analyzer.frequencyBinCount, 1).name("freqIndex");
+				gui.add(voiceParams, 'noiseRatio', 0, 1, 0.01).name("noiseRatio");
+				gui.add(voiceParams, 'eyebrowRatio', 0, 1, 0.01).name("eyebrowRatio");
+				gui.add(voiceParams, 'gain', 0, 10, 0.01).name("gain");
+				gui.add(analyzer, 'smoothingTimeConstant', 0.8, 1, 0.001).name("smoothing");
+			}
+
+			function onWindowResize() {
+				renderer.setSize(window.innerWidth, window.innerHeight);
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+				render();
+			}
+
+			function map_range(value, low1, high1, low2, high2) {
+				return low2 + (high2 - low2) * (value - low1) / (high1 - low1);
+			}
+
+			function render() {
+				analyzer.getFloatFrequencyData(frequencyArray);
+				const noiseFloor = analyzer.minDecibels + (voiceParams.noiseRatio * range);
+				mesh.morphTargetInfluences[0] = Math.min(
+					1.0,
+					voiceParams.gain * map_range(
+						Math.max(
+							noiseFloor,
+							frequencyArray[voiceParams.freqIndex]
+						),
+						noiseFloor,
+						analyzer.maxDecibels,
+						0.0,
+						1.0
+					)
+				);
+
+				const eyebrowFloor = analyzer.minDecibels + (voiceParams.eyebrowRatio * range);
+				const oldEyebrowVal = mesh.morphTargetInfluences[1] * 0.999;
+				const newEyebrowVal = Math.min(
+					1.0,
+					voiceParams.gain * map_range(
+						Math.max(
+							eyebrowFloor,
+							frequencyArray[voiceParams.freqIndex]
+						),
+						eyebrowFloor,
+						analyzer.maxDecibels,
+						0.0,
+						1.0
+					)
+				);
+				mesh.morphTargetInfluences[1] = Math.max(oldEyebrowVal, newEyebrowVal);
+
+				requestAnimationFrame(render);
+
+				const delta = clock.getDelta();
+
+				mixer.update(delta);
+
+				renderer.render(scene, camera);
+			}
+		</script>
+		<canvas id="c"></canvas>
+	</body>
+</html>
